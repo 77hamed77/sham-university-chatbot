@@ -1,27 +1,13 @@
-# streamlit==1.35.0
-# langchain-community==0.2.2
-# # langchain-google-genai==0.0.17
-# langchain-core==0.2.8
-# sentence-transformers==2.7.0
-# python-dotenv==1.0.1
-# requests==2.32.3
-# beautifulsoup4==4.12.3
-# pytesseract==0.3.10
-# Pillow==10.3.0
-# faiss-cpu==1.8.0
-# langchain-google-genai
-
-streamlit==1.35.0 # أو أحدث مثل 1.45.1 إذا لم يكن هناك سبب لـ 1.35.0
+streamlit==1.35.0 # أو أحدث إذا كنت تفضل
 langchain-community==0.2.2
-# langchain-google-genai==0.0.17 # هذا السطر كان خاطئًا، تأكد من أن لديك السطر الصحيح
-langchain-google-genai==2.1.5   # هذا هو السطر الصحيح الذي ناقشناه سابقًا
-langchain-core==0.2.8
+langchain-google-genai==2.1.5
+# langchain-core==0.2.8  <-- هذا السطر يجب حذفه أو التعليق عليه
 sentence-transformers==2.7.0
 python-dotenv==1.0.1
 requests==2.32.3
 beautifulsoup4==4.12.3
 pytesseract==0.3.10
-Pillow==10.2.0 # جرب إصدارًا أقدم قليلاً من Pillow
-# ... باقي الحزم الخاصة بك ...
-faiss-cpu==1.7.4 # جرب إصدارًا أقدم من faiss-cpu
+Pillow==10.2.0 # أو Pillow
+# ... باقي الحزم ...
+faiss-cpu==1.7.4 # أو علّقه إذا كنت لا تحتاجه للنشر: # faiss-cpu==1.7.4
 # ...
