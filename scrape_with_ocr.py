@@ -2,200 +2,180 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import urllib3
-import pytesseract # لاستخدام Tesseract OCR
-from PIL import Image # لمعالجة الصور
-import io # للمساعدة في قراءة بيانات الصورة من الذاكرة
-import os # لتعيين مسار Tesseract إذا لزم الأمر
+import pytesseract
+from PIL import Image
+import io
+import os
+import time
+from tqdm import tqdm # لاستخدام شريط التقدم
 
-# --- إعداد Tesseract OCR في بايثون (قد يكون ضرورياً إذا لم يتم اكتشافه تلقائياً) ---
-# إذا واجهت مشاكل في العثور على Tesseract، قم بإلغاء التعليق عن السطر التالي
-# وقم بتعيين المسار الصحيح لمجلد Tesseract-OCR الذي يحتوي على tesseract.exe
-pytesseract.pytesseract.tesseract_cmd = r'C:\Users\ALWAFER\AppData\Local\Programs\Tesseract-OCR\tesseract.exe' # تأكد من تعديل هذا المسار حسب تثبيتك
+# --- إعداد Tesseract OCR في بايثون (تأكد من تعديل هذا المسار) ---
+pytesseract.pytesseract.tesseract_cmd = r'C:\Users\ALWAFER\AppData\Local\Programs\Tesseract-OCR\tesseract.exe' 
 
 # إخفاء تحذير InsecureRequestWarning عند تعطيل التحقق من SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# قائمة لتخزين جميع الفقرات النصية المستخلصة (من HTML و الصور)
-all_extracted_text = []
-# مجموعة لتتبع الروابط التي تمت زيارتها لتجنب التكرار
-visited_urls = set()
+# قائمة لتخزين جميع الفقرات النصية المستخلصة
+all_extracted_ocr_texts = []
+# مجموعة لتتبع الروابط التي تمت زيارتها لتجنب التكرار في الزحف
+visited_urls_ocr = set() # اسم مختلف لتجنب التداخل مع سكربت آخر إذا تم تشغيلهما بالتوازي
+# مجموعة لتتبع صور تم معالجتها بـ OCR لتجنب تكرار معالجة نفس الصورة
+processed_image_urls = set()
+# قائمة انتظار للزحف (URL, depth)
+crawl_queue_ocr = []
 
 def extract_text_from_image(image_url):
     """
     يقوم بتحميل صورة من عنوان URL ويستخلص النص منها باستخدام Tesseract OCR.
     """
+    if image_url in processed_image_urls: # تجنب معالجة نفس الصورة
+        return ""
+    processed_image_urls.add(image_url)
+
     try:
-        # تحميل الصورة
         img_response = requests.get(image_url, stream=True, timeout=10, verify=False)
         img_response.raise_for_status()
-
-        # قراءة محتوى الصورة في الذاكرة وتحويلها إلى كائن Image
         image = Image.open(io.BytesIO(img_response.content))
         
-        # تحويل الصورة إلى وضع أبيض وأسود أو تدرج رمادي لتحسين OCR إذا لزم الأمر
-        # image = image.convert('L') # تدرج رمادي
-        # image = image.convert('1') # أبيض وأسود
-
-        # استخلاص النص باستخدام Tesseract OCR
-        # lang='ara+eng' يخبر Tesseract بالبحث عن النص العربي والإنجليزي
+        # تحويل الصورة إلى وضع تدرج رمادي لتحسين OCR
+        image = image.convert('L') 
+        
         text = pytesseract.image_to_string(image, lang='ara+eng')
         
-        # تنظيف النص المستخلص (إزالة المسافات الزائدة)
-        text = text.strip()
-        return text
-
+        return text.strip()
     except requests.exceptions.RequestException as e:
-        print(f"خطأ في تحميل الصورة {image_url}: {e}")
+        # print(f"خطأ في تحميل الصورة {image_url}: {e}")
         return ""
     except pytesseract.TesseractNotFoundError:
         print("خطأ: Tesseract OCR غير موجود. تأكد من تثبيته وإضافته إلى PATH.")
         return ""
     except Exception as e:
-        print(f"حدث خطأ أثناء معالجة الصورة {image_url}: {e}")
+        # print(f"حدث خطأ أثناء معالجة الصورة {image_url}: {e}")
         return ""
 
 def scrape_single_page_with_ocr(url):
     """
     يقوم بجمع الفقرات النصية من HTML والنصوص من الصور من صفحة ويب واحدة.
     """
-    if url in visited_urls:
+    if url in visited_urls_ocr:
         return [] # تم زيارة هذه الصفحة من قبل
 
-    print(f"جاري جمع المعلومات (بما في ذلك الصور) من: {url}")
-    visited_urls.add(url)
+    visited_urls_ocr.add(url)
 
-    page_texts = []
+    page_texts_raw = []
+    new_links_to_crawl = []
+
     try:
-        response = requests.get(url, timeout=15, verify=False) # زيادة المهلة قليلاً
+        response = requests.get(url, timeout=15, verify=False) 
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
 
-        # استخلاص الفقرات النصية العادية
-        for paragraph in soup.find_all('p'):
-            text = paragraph.get_text(strip=True)
-            if text:
-                page_texts.append(text)
+        # استخلاص الروابط لمتابعة الزحف
+        for link_tag in soup.find_all('a', href=True):
+            href = link_tag.get('href')
+            if href and not href.startswith('#'):
+                full_url = urljoin(url, href)
+                if urlparse(full_url).netloc == urlparse(url).netloc:
+                    new_links_to_crawl.append(full_url)
 
-        # استخلاص النصوص من الصور
+        # استخلاص الفقرات النصية العادية من HTML
+        for paragraph_tag in soup.find_all('p'):
+            text = paragraph_tag.get_text(strip=True)
+            if text:
+                page_texts_raw.append(text)
+
+        # استخلاص النصوص من الصور باستخدام OCR
         for img_tag in soup.find_all('img'):
             img_src = img_tag.get('src')
             if img_src:
                 full_img_url = urljoin(url, img_src)
-                # يمكننا إضافة بعض المنطق هنا لتصفية الصور (مثلاً، تجاهل الأيقونات الصغيرة)
-                # مثال: if not img_src.endswith(('.gif', '.ico')) and img_tag.get('width', 0) > 50:
+                # فلترة الصور الصغيرة جدًا أو الأيقونات لتجنب OCR غير الضروري
+                # يمكنك تعديل هذه الشروط بناءً على تحليل موقعك
+                if img_tag.get('width') and int(img_tag['width']) < 50 and img_tag.get('height') and int(img_tag['height']) < 50:
+                     continue # تخطي الصور الصغيرة جداً
                 
-                # يمكنك إضافة فحص إذا كانت الصورة تحتوي على نص مهم بناءً على السياق
-                # مثلاً: إذا كانت الصورة داخل <div class="info-block">
                 extracted_img_text = extract_text_from_image(full_img_url)
                 if extracted_img_text:
-                    page_texts.append(extracted_img_text)
-                    print(f"  - تم استخلاص نص من صورة: {full_img_url[:60]}...") # لطباعة جزء من الرابط
+                    page_texts_raw.append(extracted_img_text)
+                    # print(f"  - تم استخلاص نص من صورة: {full_img_url[:60]}...") 
 
-        print(f"تم جمع معلومات من: {url} بنجاح!")
-        return page_texts
+        return new_links_to_crawl, page_texts_raw # ارجاع الروابط والنصوص الخام
 
     except requests.exceptions.Timeout:
-        print(f"انتهت مهلة الاتصال عند {url}")
-        return []
+        # print(f"انتهت مهلة الاتصال عند {url}")
+        pass
     except requests.exceptions.RequestException as e:
-        print(f"حدث خطأ أثناء الاتصال بالخادم عند {url}: {e}")
-        return []
+        # print(f"حدث خطأ أثناء الاتصال بالخادم عند {url}: {e}")
+        pass
     except Exception as e:
-        print(f"حدث خطأ غير متوقع عند {url}: {e}")
-        return []
+        # print(f"حدث خطأ غير متوقع عند {url}: {e}")
+        pass
+    return [], []
 
-def crawl_university_website_with_ocr(start_urls, max_depth=1):
-    """
-    يزحف على صفحات موقع الجامعة ويستخلص النص من HTML والصور.
-    """
-    queue = [(url, 0) for url in start_urls]
+def crawl_ocr_website(start_urls, max_depth=3, output_file="university_texts_with_ocr.txt"):
+    global crawl_queue_ocr, visited_urls_ocr, all_extracted_ocr_texts, processed_image_urls # للوصول للمتغيرات العالمية
+
+    # إعادة تهيئة في حال تم التشغيل أكثر من مرة
+    crawl_queue_ocr = [(url, 0) for url in start_urls if url not in visited_urls_ocr]
+    visited_urls_ocr.clear() 
+    all_extracted_ocr_texts.clear()
+    processed_image_urls.clear()
+
+    initial_queue_size = len(crawl_queue_ocr)
     
-    while queue:
-        current_url, current_depth = queue.pop(0)
+    print("\nبدء عملية الزحف واستخلاص النصوص من HTML والصور (OCR)...")
 
-        if current_depth > max_depth:
-            continue
+    with tqdm(total=initial_queue_size, unit="صفحة", desc="الزحف ومعالجة الصور") as pbar:
+        while crawl_queue_ocr:
+            current_url, current_depth = crawl_queue_ocr.pop(0)
 
-        texts_from_page = scrape_single_page_with_ocr(current_url)
-        all_extracted_text.extend(texts_from_page)
+            if current_url in visited_urls_ocr:
+                pbar.update(1)
+                continue
 
-        # متابعة الروابط الداخلية لاستكشاف المزيد من الصفحات
-        # (يمكنك تعديل هذا الجزء ليكون أكثر ذكاءً ويتبع فقط الروابط المهمة)
-        if current_depth < max_depth:
-            try:
-                response = requests.get(current_url, timeout=5, verify=False)
-                soup = BeautifulSoup(response.text, 'html.parser')
-                for link in soup.find_all('a', href=True):
-                    href = link['href']
-                    if href and not href.startswith('#'):
-                        full_url = urljoin(current_url, href)
-                        if urlparse(full_url).netloc == urlparse(current_url).netloc and full_url not in visited_urls:
-                            queue.append((full_url, current_depth + 1))
-            except Exception as e:
-                # print(f"خطأ في متابعة الروابط من {current_url}: {e}")
-                pass # تجاهل أخطاء الروابط الثانوية هنا
+            links_from_page, texts_from_page = scrape_single_page_with_ocr(current_url)
+            all_extracted_ocr_texts.extend(texts_from_page)
+            
+            pbar.update(1)
+            pbar.set_postfix_str(f"فقرات OCR مجمعة: {len(all_extracted_ocr_texts)}")
 
-# قائمة الروابط التي قدمتها سابقاً
-initial_urls = [
+
+            if current_depth < max_depth:
+                for link in links_from_page:
+                    if link not in visited_urls_ocr and (link, current_depth + 1) not in crawl_queue_ocr:
+                        crawl_queue_ocr.append((link, current_depth + 1))
+                        pbar.total += 1
+                        pbar.refresh()
+
+    print("\nعملية الزحف واستخلاص النصوص من الصور انتهت!")
+    print(f"تم جمع {len(all_extracted_ocr_texts)} فقرة نصية (من HTML و OCR).")
+
+    # حفظ جميع الفقرات المستخلصة في ملف
+    with open(output_file, "w", encoding="utf-8") as f:
+        for text_item in all_extracted_ocr_texts:
+            f.write(text_item + "\n")
+    print(f"تم حفظ نصوص OCR الخام في الملف: {output_file}")
+
+
+# --- الروابط الأولية للبدء بالزحف ---
+initial_urls_for_ocr_crawl = [
     "https://shamuniversity.com",
-    "https://shamuniversity.com/nav14", # كلية العلوم الصحية
-    "https://shamuniversity.com/nav21", # كلية الاقتصاد والإدارة
-    "https://shamuniversity.com/nav28", # كلية الهندسة
-    "https://shamuniversity.com/nav29", # كلية التربية
-    "https://shamuniversity.com/nav24", # كلية الشريعة والقانون
-    "https://shamuniversity.com/nav25", # كلية العلوم السياسية
-    "https://shamuniversity.com/nav15", # الهندسة الكيميائية
-    "https://shamuniversity.com/nav36", # الهندسة الزراعية
-    "https://shamuniversity.com/nav41", # عن الجامعة
-    "https://shamuniversity.com/nav67", # مركز شام
-    # يمكنك إضافة المزيد من الروابط الهامة هنا
+    "https://shamuniversity.com/nav14", 
+    "https://shamuniversity.com/nav21", 
+    "https://shamuniversity.com/nav28", 
+    "https://shamuniversity.com/nav29", 
+    "https://shamuniversity.com/nav24", 
+    "https://shamuniversity.com/nav25", 
+    "https://shamuniversity.com/nav15", 
+    "https://shamuniversity.com/nav36", 
+    "https://shamuniversity.com/nav41", 
+    "https://shamuniversity.com/nav67", 
     "https://shamuniversity.com/nav52",
-    "https://shamuniversity.com/navnone",
+    "https://shamuniversity.com/navnone", 
     "https://shamuniversity.com/nav64"
-
-
 ]
 
-print("بدء عملية الزحف واستخلاص النصوص من HTML والصور...")
-# ابدأ بعمق 1 لزيارة الروابط الأولية فقط، ثم يمكنك زيادة العمق
-crawl_university_website_with_ocr(initial_urls, max_depth=1) 
-
-# تنظيف شامل للنصوص المجمعة (مثلما فعلنا سابقاً)
-# (يمكنك نسخ دالة clean_text_data() من ملف clean_data.py هنا أو استيرادها)
-def clean_text_data(texts):
-    cleaned_unique_texts = set()
-    unwanted_phrases = [
-        "نهتم دوما بالاستماع إلى مقترحاتكم وآرائكم.",
-        "Copyright ©جميع الحقوق محفوظة لجامعة الشام",
-        "جامعة الشام",
-        "Sham university",
-        "المزيد",
-        "Copyright ©جميع الحقوق محفوظة لمركز شام للدراسات والبحث العلمي",
-        "Sham university"
-    ]
-    for text in texts:
-        text = text.strip()
-        for phrase in unwanted_phrases:
-            text = text.replace(phrase, "")
-        text = re.sub(r'[^\u0600-\u06FF\sA-Za-z0-9\.\,]', '', text) # الاحتفاظ بالأرقام وعلامات الترقيم الأساسية
-        text = re.sub(r'\s+', ' ', text).strip()
-        if text and len(text) > 10: # زيادة الطول الأدنى للفقرة
-            cleaned_unique_texts.add(text)
-    return list(cleaned_unique_texts)
-
-import re # استيراد re لدالة التنظيف
-
-final_cleaned_texts = clean_text_data(all_extracted_text)
-
-# حفظ النصوص المستخلصة في ملف جديد
-output_file_with_ocr = "university_texts_with_ocr.txt"
-with open(output_file_with_ocr, "w", encoding="utf-8") as f:
-    for text_item in final_cleaned_texts:
-        f.write(text_item + "\n")
-print(f"\nتم جمع وحفظ النصوص المستخلصة (بما في ذلك من الصور) في الملف: {output_file_with_ocr}")
-
-# ملاحظة: بعد هذه الخطوة، ستحتاج إلى إعادة بناء قاعدة بيانات المتجهات
-# باستخدام النصوص الجديدة من 'university_texts_with_ocr.txt'
-# ثم ستحتاج إلى تحديث ملف الـ FAQ 'university_faq_qa.txt' يدوياً بمساعدة Gemini
-# ثم إعادة بناء قاعدة بيانات المتجهات لـ FAQ
-# ثم تشغيل الشات بوت.
+# --- كيفية الاستخدام (تشغيل السكربت) ---
+if __name__ == "__main__":
+    output_ocr_file = "university_texts_with_ocr.txt"
+    crawl_ocr_website(initial_urls_for_ocr_crawl, max_depth=1, output_file=output_ocr_file)
